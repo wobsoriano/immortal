@@ -151,7 +151,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
-private data class AppEntry(
+internal data class AppEntry(
     val label: String,
     val component: ComponentName,
     val icon: ImageBitmap,
@@ -200,27 +200,11 @@ class HomeActivity : ComponentActivity() {
     setContent {
       SampleAppTheme(darkTheme = true) {
         LauncherScreen(
-            onLaunch = { cn ->
-              runCatching {
-                startActivity(
-                    Intent(Intent.ACTION_MAIN)
-                        .addCategory(Intent.CATEGORY_LAUNCHER)
-                        .setComponent(cn)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-              }
-            },
-            onOpenStore = {
-              runCatching { startActivity(Intent(this, StoreActivity::class.java)) }
-            },
-            onOpenHelp = {
-              runCatching { startActivity(Intent(this, HelpActivity::class.java)) }
-            },
-            onStartScreensaver = {
-              runCatching {
-                startActivity(Intent(this, PhotoFramePreviewActivity::class.java))
-              }
-            },
-            onExitHome = { launchStockHome() },
+            onLaunch = ::launchApp,
+            onOpenStore = ::openStore,
+            onOpenHelp = ::openHelp,
+            onStartScreensaver = ::startPhotoFrame,
+            onExitHome = ::launchStockHome,
             onUninstall = { pkg ->
               // System uninstall dialog; no special permission needed.
               runCatching {
@@ -233,6 +217,28 @@ class HomeActivity : ComponentActivity() {
         )
       }
     }
+  }
+
+  private fun launchApp(cn: ComponentName) {
+    runCatching {
+      startActivity(
+          Intent(Intent.ACTION_MAIN)
+              .addCategory(Intent.CATEGORY_LAUNCHER)
+              .setComponent(cn)
+              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+  }
+
+  private fun openStore() {
+    runCatching { startActivity(Intent(this, StoreActivity::class.java)) }
+  }
+
+  private fun openHelp() {
+    runCatching { startActivity(Intent(this, HelpActivity::class.java)) }
+  }
+
+  private fun startPhotoFrame() {
+    runCatching { startActivity(Intent(this, PhotoFramePreviewActivity::class.java)) }
   }
 
   // Re-assert immersive fullscreen whenever the launcher regains focus — e.g.
@@ -855,50 +861,7 @@ private fun LauncherScreen(
     }
   }
 
-  // --- over-the-air self-update -----------------------------------------------
-  var update by remember { mutableStateOf<UpdateInfo?>(null) }
-  var updateStatus by remember { mutableStateOf<String?>(null) }
-  var pendingConfirm by remember { mutableStateOf<Intent?>(null) }
-  val confirmLauncher =
-      rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
-  // Check on launch, then periodically while the launcher runs (it's the
-  // long-lived home, so a one-shot check would go stale). The Updates tile also
-  // lets the user force a check at any time.
-  LaunchedEffect(Unit) {
-    while (true) {
-      UpdateManager.checkForUpdate(context) { update = it }
-      delay(UPDATE_CHECK_INTERVAL_MS)
-    }
-  }
-  LaunchedEffect(pendingConfirm) {
-    pendingConfirm?.let {
-      confirmLauncher.launch(it)
-      pendingConfirm = null
-    }
-  }
-  DisposableEffect(Unit) {
-    val receiver =
-        object : android.content.BroadcastReceiver() {
-          override fun onReceive(c: android.content.Context, intent: Intent) {
-            when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)) {
-              PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                pendingConfirm =
-                    if (android.os.Build.VERSION.SDK_INT >= 33)
-                        intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
-                    else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_INTENT)
-                updateStatus = "Confirm to update…"
-              }
-              PackageInstaller.STATUS_SUCCESS -> updateStatus = "Updated"
-              else -> updateStatus = "Update failed"
-            }
-          }
-        }
-    val filter = android.content.IntentFilter(UPDATE_INSTALL_ACTION)
-    if (android.os.Build.VERSION.SDK_INT >= 33)
-        context.registerReceiver(receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
-    else @Suppress("UnspecifiedRegisterReceiverFlag") context.registerReceiver(receiver, filter)
-    onDispose { runCatching { context.unregisterReceiver(receiver) } }
-  }
+  val selfUpdate = rememberSelfUpdate()
 
   CompositionLocalProvider(LocalTileDp provides tileDpFor(tileSize)) {
   Box(modifier = Modifier.fillMaxSize()) {
@@ -1056,17 +1019,8 @@ private fun LauncherScreen(
                     }
                 key == BUILTIN_UPDATES ->
                     HomeTileFrame(boundsMod, isDragged) {
-                      UpdatesTile(update = update, status = updateStatus) {
-                        val info = update
-                        if (info != null) {
-                          UpdateManager.installUpdate(context, info) { updateStatus = it }
-                        } else {
-                          updateStatus = "Checking…"
-                          UpdateManager.checkForUpdate(context) {
-                            update = it
-                            updateStatus = if (it == null) "Up to date" else null
-                          }
-                        }
+                      UpdatesTile(update = selfUpdate.update, status = selfUpdate.status) {
+                        selfUpdate.tap(context)
                       }
                     }
                 key.startsWith(WIDGET_KEY) ->
@@ -1270,12 +1224,80 @@ private fun LauncherScreen(
   } // CompositionLocalProvider(LocalTileDp)
 }
 
+/** The over-the-air self-update the home screens surface as an Updates tile. */
+internal class SelfUpdateState {
+  var update by mutableStateOf<UpdateInfo?>(null)
+  var status by mutableStateOf<String?>(null)
+
+  /** Install the waiting update, or check for one when there is none. */
+  fun tap(context: Context) {
+    val info = update
+    if (info != null) {
+      UpdateManager.installUpdate(context, info) { status = it }
+    } else {
+      status = "Checking…"
+      UpdateManager.checkForUpdate(context) {
+        update = it
+        status = if (it == null) "Up to date" else null
+      }
+    }
+  }
+}
+
+@Composable
+internal fun rememberSelfUpdate(): SelfUpdateState {
+  val context = androidx.compose.ui.platform.LocalContext.current
+  val state = remember { SelfUpdateState() }
+  var pendingConfirm by remember { mutableStateOf<Intent?>(null) }
+  val confirmLauncher =
+      rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
+  // Check on launch, then periodically while the launcher runs (it's the
+  // long-lived home, so a one-shot check would go stale). The Updates tile also
+  // lets the user force a check at any time.
+  LaunchedEffect(Unit) {
+    while (true) {
+      UpdateManager.checkForUpdate(context) { state.update = it }
+      delay(UPDATE_CHECK_INTERVAL_MS)
+    }
+  }
+  LaunchedEffect(pendingConfirm) {
+    pendingConfirm?.let {
+      confirmLauncher.launch(it)
+      pendingConfirm = null
+    }
+  }
+  DisposableEffect(Unit) {
+    val receiver =
+        object : android.content.BroadcastReceiver() {
+          override fun onReceive(c: android.content.Context, intent: Intent) {
+            when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -999)) {
+              PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                pendingConfirm =
+                    if (android.os.Build.VERSION.SDK_INT >= 33)
+                        intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                    else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_INTENT)
+                state.status = "Confirm to update…"
+              }
+              PackageInstaller.STATUS_SUCCESS -> state.status = "Updated"
+              else -> state.status = "Update failed"
+            }
+          }
+        }
+    val filter = android.content.IntentFilter(UPDATE_INSTALL_ACTION)
+    if (android.os.Build.VERSION.SDK_INT >= 33)
+        context.registerReceiver(receiver, filter, android.content.Context.RECEIVER_NOT_EXPORTED)
+    else @Suppress("UnspecifiedRegisterReceiverFlag") context.registerReceiver(receiver, filter)
+    onDispose { runCatching { context.unregisterReceiver(receiver) } }
+  }
+  return state
+}
+
 /**
  * Full-screen "time's up" alarm overlay with an iOS-style slide-to-stop. Blocks touches from
  * reaching the grid beneath, so the only way out is the slider (or the 60s auto-silence).
  */
 @Composable
-private fun TimerAlarmOverlay(onStop: () -> Unit) {
+internal fun TimerAlarmOverlay(onStop: () -> Unit) {
   val noRipple = remember { MutableInteractionSource() }
   Box(
       contentAlignment = Alignment.Center,
@@ -1828,7 +1850,7 @@ private const val HEY_TRIGGER_ACTION = "com.millennium.TRIGGER_ASSISTANT"
 private val HEY_PACKAGES = listOf("com.millennium", "com.millennium.debug")
 
 /** The installed Millennium ("hey") package, release preferred, or null if absent. */
-private fun heyPackage(context: android.content.Context): String? =
+internal fun heyPackage(context: android.content.Context): String? =
     HEY_PACKAGES.firstOrNull { pkg ->
       try {
         context.packageManager.getPackageInfo(pkg, 0)
@@ -1839,7 +1861,7 @@ private fun heyPackage(context: android.content.Context): String? =
     }
 
 /** Ask Millennium to activate the user's active assistant (same path as a wake word). */
-private fun fireHey(context: android.content.Context, pkg: String) {
+internal fun fireHey(context: android.content.Context, pkg: String) {
   context.sendBroadcast(Intent(HEY_TRIGGER_ACTION).setPackage(pkg))
 }
 
@@ -1848,7 +1870,7 @@ private const val HEY_PICKER_ACTIVITY = "com.millennium.ui.HeyPickerActivity"
 
 /** Long-press: open Millennium's picker. Falls back to a normal trigger if the
  *  installed Millennium predates the picker (so the gesture is never a dead end). */
-private fun openHeyPicker(context: android.content.Context, pkg: String) {
+internal fun openHeyPicker(context: android.content.Context, pkg: String) {
   val ok =
       runCatching {
             context.startActivity(
@@ -3329,7 +3351,7 @@ private fun AppTile(
 
 // --- data ---------------------------------------------------------------------
 
-private fun loadApps(context: Context): List<AppEntry> {
+internal fun loadApps(context: Context): List<AppEntry> {
   val pm = context.packageManager
   val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
   return pm.queryIntentActivities(intent, 0)
