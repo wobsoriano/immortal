@@ -8,7 +8,6 @@
 package com.immortal.launcher
 
 import android.app.Activity
-import androidx.compose.ui.composed
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -32,6 +31,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -55,6 +55,7 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -63,10 +64,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -84,8 +87,8 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -102,7 +105,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -157,7 +159,12 @@ fun GlassHome(actions: GlassActions) {
     }
     ui = next
   }
-  LaunchedEffect(ui.face, ui.looks) { GlassPrefs.save(context, ui) }
+  LaunchedEffect(Unit) { snapshotFlow { ui.face to ui.looks }.collect { GlassPrefs.save(context, ui) } }
+  // Composition reads [ui] only through these, so a swipe, which changes just the face, recomposes
+  // nothing but the page dots. Recomposing this whole screen cost each swipe's first frame 5-10 ms.
+  val layer by remember { derivedStateOf { ui.layer } }
+  val portalColor by remember { derivedStateOf { ui.palette(GlassFace.Portal)!!.background } }
+  val portalWallpaperIndex by remember { derivedStateOf { ui.wallpaper(GlassFace.Portal) } }
   // Always on: as the home screen, Back on a face must not finish us and expose whatever task is below.
   BackHandler { send(GlassEvent.Back) }
 
@@ -235,12 +242,24 @@ fun GlassHome(actions: GlassActions) {
     onDispose { TimerStore.removeListener(l) }
   }
 
+  // Remembered so a face change doesn't hand the Portal face new actions and recompose its tiles.
+  val portalActions =
+      remember(actions) {
+        PortalActions(
+            photoFrame = actions.photoFrame,
+            heyMuse = { heyMuse(context) },
+            volume = { delta -> control { device.stepVolume(delta) } },
+            dnd = { control { device.toggleDnd() } },
+            screen = { keepAwake = !keepAwake },
+            brightness = { control { device.stepBrightness() } },
+        )
+      }
+
   BoxWithConstraints(Modifier.fillMaxSize().background(EditBackdrop)) {
     val w = constraints.maxWidth
     val h = constraints.maxHeight
     val portalLayout = remember(w, h) { portalLayout(Size(w.toFloat(), h.toFloat() - CHROME_HEIGHT)) }
-    val portalColor = ui.palette(GlassFace.Portal)!!.background
-    val portalWallpaper = ui.wallpaper(GlassFace.Portal)?.let { wallpapers.getOrNull(it)?.file }
+    val portalWallpaper = portalWallpaperIndex?.let { wallpapers.getOrNull(it)?.file }
     val portalBackdrop by
         produceState<GlassBackdrop?>(null, w, h, portalColor, portalWallpaper) {
           value =
@@ -256,7 +275,9 @@ fun GlassHome(actions: GlassActions) {
           value = withContext(Dispatchers.Default) { buildGlassBackdrop(photoBackground(p), w, h, emptyList()) }
         }
 
-    val edit by animateFloatAsState(if (ui.layer == GlassLayer.Edit) 1f else 0f, tween(450, easing = FastOutSlowInEasing), label = "edit")
+    // Remembered so a face change doesn't rebuild the gesture detector.
+    val gestures = remember { Modifier.faceGestures(editing = { ui.layer == GlassLayer.Edit }, onEvent = ::send) }
+    val edit by animateFloatAsState(if (layer == GlassLayer.Edit) 1f else 0f, tween(450, easing = FastOutSlowInEasing), label = "edit")
     val density = LocalDensity.current
     Box(
         Modifier.fillMaxSize()
@@ -270,59 +291,57 @@ fun GlassHome(actions: GlassActions) {
                 shape = RoundedCornerShape(with(density) { (106 * edit).dp })
               }
             }
-            .faceGestures(editing = ui.layer == GlassLayer.Edit, onEvent = ::send)) {
+            .then(gestures)) {
           // Every face stays composed and in the render tree; the ones not on screen are parked
           // beside it. A swipe then only moves two layers. Composing a face as it slid in cost a
           // 60-120 ms first frame on the Gen-1 Portal, and the double-buffered pipeline stayed a
           // frame behind for the rest of the slide. The incoming face slides over the outgoing one,
           // which drifts back at a quarter of the speed. No fades: an alpha transition renders both
           // faces offscreen, and that fill cost made a third of the frames janky.
-          val dir = ui.direction
-          GlassFace.entries.forEach { face ->
-            key(face) {
-              val incoming = face == ui.face
-              val outgoing = !incoming && face == leaving
-              Box(
-                  Modifier.fillMaxSize().zIndex(if (incoming) 1f else 0f).graphicsLayer {
-                    translationX =
-                        when {
-                          incoming -> dir * size.width * (1f - slide.value)
-                          outgoing -> -dir * size.width / 4f * slide.value
-                          else -> PARKED * size.width
+          // Which face is where is read only while placing and drawing, so a swipe recomposes
+          // nothing here: the incoming face is placed on top and the two layers move.
+          Layout(
+              content = {
+                GlassFace.entries.forEach { face ->
+                  key(face) {
+                    Box(
+                        Modifier.fillMaxSize().graphicsLayer {
+                          translationX =
+                              when (face) {
+                                ui.face -> ui.direction * size.width * (1f - slide.value)
+                                leaving -> -ui.direction * size.width / 4f * slide.value
+                                else -> PARKED * size.width
+                              }
+                        }) {
+                          when (face) {
+                            GlassFace.Portal -> PortalFace(portalBackdrop, portalLayout, deviceState, keepAwake, museReady, portalActions)
+                            GlassFace.Numerals -> {
+                              val look by remember { derivedStateOf { ui.palette(face)!! to ui.look(face).style } }
+                              NumeralsFace(look.first, look.second)
+                            }
+                            GlassFace.Modular -> {
+                              val look by remember { derivedStateOf { ui.palette(face)!! to ui.look(face).style } }
+                              ModularFace(look.first, look.second, weather, agenda, use24Hour)
+                            }
+                            GlassFace.Photo -> PhotoFace(photoBackdrop, use24Hour)
+                          }
                         }
-                  }) {
-                    val palette = ui.palette(face)
-                    when (face) {
-                      GlassFace.Portal ->
-                          PortalFace(
-                              portalBackdrop,
-                              portalLayout,
-                              deviceState,
-                              keepAwake,
-                              museReady,
-                              PortalActions(
-                                  photoFrame = actions.photoFrame,
-                                  heyMuse = { heyMuse(context) },
-                                  volume = { delta -> control { device.stepVolume(delta) } },
-                                  dnd = { control { device.toggleDnd() } },
-                                  screen = { keepAwake = !keepAwake },
-                                  brightness = { control { device.stepBrightness() } },
-                              ))
-                      GlassFace.Numerals -> NumeralsFace(palette!!, ui.look(face).style)
-                      GlassFace.Modular -> ModularFace(palette!!, ui.look(face).style, weather, agenda, use24Hour)
-                      GlassFace.Photo -> PhotoFace(photoBackdrop, use24Hour)
-                    }
                   }
-            }
-          }
+                }
+              }) { measurables, constraints ->
+                val placeables = measurables.map { it.measure(constraints) }
+                layout(constraints.maxWidth, constraints.maxHeight) {
+                  placeables.forEachIndexed { i, p -> p.place(0, 0, zIndex = if (GlassFace.entries[i] == ui.face) 1f else 0f) }
+                }
+              }
         }
 
     // Parked rather than removed under the Home Screen and edit mode, so closing those doesn't
     // compose the chrome again mid-slide.
-    Box(Modifier.parked(ui.layer != GlassLayer.Faces)) {
+    Box(Modifier.parked(layer != GlassLayer.Faces)) {
       FaceChrome(
-          ui = ui,
-          museReady = museReady && ui.face != GlassFace.Portal,
+          face = { ui.face },
+          museReady = museReady,
           onHeyMuse = { heyMuse(context) },
           onHome = { send(GlassEvent.SwipeUp) },
           onDot = { send(GlassEvent.GoTo(it)) })
@@ -332,11 +351,11 @@ fun GlassHome(actions: GlassActions) {
     // The Home Screen stays composed and drawn, parked just below the screen while closed, so
     // opening it only moves a layer. Unplacing it dropped its display lists from the render tree,
     // and re-recording fifteen app tiles cost the first frame of every open about 30 ms.
-    val home by animateFloatAsState(if (ui.layer == GlassLayer.Home) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "home")
+    val home by animateFloatAsState(if (layer == GlassLayer.Home) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "home")
     Box(Modifier.fillMaxSize().graphicsLayer { translationY = (1f - home) * size.height }) {
           GlassHomeScreen(
               frost = homeFrost,
-              fallback = Color(ui.palette()?.background ?: 0xFF1B2030),
+              fallback = { Color(ui.palette()?.background ?: 0xFF1B2030) },
               weather = weather,
               use24Hour = use24Hour,
               heyPkg = heyPkg,
@@ -414,16 +433,13 @@ private enum class Gesture { Tap, Drag }
  * plain tap passes through to the tile. While [editing], every touch is the card's, so tiles under it
  * stay inert.
  */
-private fun Modifier.faceGestures(editing: Boolean, onEvent: (GlassEvent) -> Unit): Modifier = composed {
-  // Read through state rather than keying pointerInput on it: a long press flips [editing], and
+private fun Modifier.faceGestures(editing: () -> Boolean, onEvent: (GlassEvent) -> Unit): Modifier =
+  // [editing] is read per gesture rather than keying pointerInput on it: a long press flips it, and
   // restarting the detector then would drop the rest of that touch, letting its release reach the
   // tile underneath as a tap.
-  val editingNow by rememberUpdatedState(editing)
-  val send by rememberUpdatedState(onEvent)
   pointerInput(Unit) {
       awaitEachGesture {
-        val editing = editingNow
-        val onEvent = send
+        val editing = editing()
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         if (editing) down.consume()
         val slop = viewConfiguration.touchSlop
@@ -459,7 +475,6 @@ private fun Modifier.faceGestures(editing: Boolean, onEvent: (GlassEvent) -> Uni
         }
       }
     }
-}
 
 /** Swallows the rest of a gesture so nothing underneath reacts; returns where the finger lifted. */
 private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.consumeUntilUp(id: PointerId): Offset? {
@@ -474,47 +489,100 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.con
 
 // --- chrome over the faces --------------------------------------------------------------------
 
+/**
+ * The page dots, Home Screen pill and (off the Portal face) the Hey Muse pill. [face] is read only
+ * while laying out and drawing, so a swipe recomposes and measures nothing here. Recomposing the
+ * chrome cost a swipe's first frame 5-20 ms on a Gen-1 Portal, most of it composing and drawing the
+ * Muse pill again each time the Portal face came or went.
+ */
 @Composable
-private fun FaceChrome(ui: GlassUi, museReady: Boolean, onHeyMuse: () -> Unit, onHome: () -> Unit, onDot: (GlassFace) -> Unit) {
+private fun FaceChrome(face: () -> GlassFace, museReady: Boolean, onHeyMuse: () -> Unit, onHome: () -> Unit, onDot: (GlassFace) -> Unit) {
   Box(Modifier.fillMaxSize()) {
-    Row(
-        Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp).height(44.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-          if (museReady) {
-            val muse = ImageBitmap.imageResource(R.drawable.glass_muse)
-            val press = rememberPress()
-            Row(
-                Modifier.height(44.dp).pressable(press, onTap = onHeyMuse).frosted(press, radius = 22f).padding(start = 6.dp, end = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                  Image(muse, null, Modifier.size(34.dp), filterQuality = FilterQuality.None)
-                  BasicText("Hey Muse", style = text(18))
-                }
+    Row(Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp).height(44.dp), verticalAlignment = Alignment.CenterVertically) {
+      if (museReady) {
+        Box(remember { Modifier.collapsedWhen(gap = 20.dp) { face() == GlassFace.Portal } }) { MusePill(onHeyMuse) }
+      }
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+        PageDots(face, onDot)
+        HomePill(onHome)
+      }
+    }
+  }
+}
+
+/**
+ * Lays the element out with [gap] after it, or, while [collapsed], at no size with the element
+ * placed far off screen: it stays composed and drawn, so showing it again costs no frame.
+ */
+private fun Modifier.collapsedWhen(gap: androidx.compose.ui.unit.Dp, collapsed: () -> Boolean): Modifier =
+    layout { m, c ->
+      val p = m.measure(c)
+      if (collapsed()) layout(0, 0) { p.place(-100_000, 0) }
+      else layout(p.width + gap.roundToPx(), p.height) { p.place(0, 0) }
+    }
+
+@Composable
+private fun MusePill(onTap: () -> Unit) {
+  val muse = ImageBitmap.imageResource(R.drawable.glass_muse)
+  val press = rememberPress()
+  Row(
+      Modifier.height(44.dp).pressable(press, onTap = onTap).frosted(press, radius = 22f).padding(start = 6.dp, end = 18.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Image(muse, null, Modifier.size(34.dp), filterQuality = FilterQuality.None)
+        BasicText("Hey Muse", style = text(18))
+      }
+}
+
+private val DOT = 11.dp
+private val DOT_SELECTED = 26.dp
+private val DOT_GAP = 10.dp
+
+/** Where each dot sits along the row, in px, with [current] drawn wide. */
+private fun dotSpans(current: GlassFace, dot: Float, selected: Float, gap: Float): List<Pair<Float, Float>> {
+  var x = 0f
+  return GlassFace.entries.map { f ->
+    val w = if (f == current) selected else dot
+    (x to x + w).also { x += w + gap }
+  }
+}
+
+@Composable
+private fun PageDots(face: () -> GlassFace, onDot: (GlassFace) -> Unit) {
+  val n = GlassFace.entries.size
+  val tap by rememberUpdatedState(onDot)
+  // One canvas, read at draw time: a swipe redraws the dots without recomposing or measuring them.
+  Box(Modifier.height(44.dp).frosted(radius = 22f).padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+    Canvas(
+        Modifier.size(width = DOT_SELECTED + DOT * (n - 1) + DOT_GAP * (n - 1), height = DOT).pointerInput(Unit) {
+          detectTapGestures { pos ->
+            val spans = dotSpans(face(), DOT.toPx(), DOT_SELECTED.toPx(), DOT_GAP.toPx())
+            spans.indexOfFirst { (l, r) -> pos.x in l..r }.takeIf { it >= 0 }?.let { tap(GlassFace.entries[it]) }
           }
-          Row(
-              Modifier.height(44.dp).frosted(radius = 22f).padding(horizontal = 16.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                GlassFace.entries.forEach { f ->
-                  val selected = f == ui.face
-                  Box(
-                      Modifier.size(width = if (selected) 26.dp else 11.dp, height = 11.dp)
-                          .clip(CircleShape)
-                          .background(if (selected) Color.White else Color.White.copy(alpha = 0.45f))
-                          .clickable(remember { MutableInteractionSource() }, null) { onDot(f) })
-                }
-              }
-          val press = rememberPress()
-          Row(
-              Modifier.height(44.dp).pressable(press, onTap = onHome).frosted(press, radius = 22f).padding(horizontal = 18.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chevron(up = true, size = 18)
-                BasicText("Home Screen", style = text(18))
-              }
+        }) {
+          val current = face()
+          val h = size.height
+          dotSpans(current, DOT.toPx(), DOT_SELECTED.toPx(), DOT_GAP.toPx()).forEachIndexed { i, (l, r) ->
+            drawRoundRect(
+                if (GlassFace.entries[i] == current) Color.White else Color.White.copy(alpha = 0.45f),
+                topLeft = Offset(l, 0f),
+                size = Size(r - l, h),
+                cornerRadius = CornerRadius(h / 2))
+          }
         }
   }
+}
+
+@Composable
+private fun HomePill(onTap: () -> Unit) {
+  val press = rememberPress()
+  Row(
+      Modifier.height(44.dp).pressable(press, onTap = onTap).frosted(press, radius = 22f).padding(horizontal = 18.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Chevron(up = true, size = 18)
+        BasicText("Home Screen", style = text(18))
+      }
 }
 
 @Composable
@@ -662,7 +730,8 @@ private const val PAGE_SIZE = 15
 @Composable
 private fun GlassHomeScreen(
     frost: ImageBitmap?,
-    fallback: Color,
+    /** Read while drawing, so a face change doesn't recompose the Home Screen. */
+    fallback: () -> Color,
     weather: GlassWeather?,
     use24Hour: Boolean,
     heyPkg: String?,
@@ -708,24 +777,21 @@ private fun GlassHomeScreen(
               badge = updateReady) { selfUpdate.tap(context) },
       ) + apps.filter { it.folder != SETTINGS_FOLDER }.map { HomeItem.App(it) }
 
-  val now = rememberNow(1000)
   Box(
       Modifier.fillMaxSize()
-          .drawBehind {
-            if (frost != null) drawImage(frost, dstSize = IntSize(size.width.toInt(), size.height.toInt()), filterQuality = FilterQuality.Low)
-            else drawRect(fallback)
-            drawRect(Brush.verticalGradient(listOf(Color(0x8A0C143C), Color(0xB3060A1E))))
-          }
           .clickable(remember { MutableInteractionSource() }, null) {}
           .swipeDownToClose(onClose)) {
+        // In its own layer: [fallback] follows the face, and redrawing it here alone keeps a swipe
+        // from re-recording the whole Home Screen behind it.
+        Spacer(
+            Modifier.fillMaxSize().graphicsLayer().drawBehind {
+              if (frost != null) drawImage(frost, dstSize = IntSize(size.width.toInt(), size.height.toInt()), filterQuality = FilterQuality.Low)
+              else drawRect(fallback())
+              drawRect(Brush.verticalGradient(listOf(Color(0x8A0C143C), Color(0xB3060A1E))))
+            })
         Column(Modifier.fillMaxSize().padding(start = 48.dp, end = 48.dp, top = 36.dp)) {
           Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-              BasicText(DateFormatter.format(Date(now), "EEEEMMMMd").uppercase(Locale.getDefault()), style = text(22, color = Color.White.copy(alpha = 0.85f)))
-              BasicText(
-                  SimpleDateFormat(if (use24Hour) "H:mm" else "h:mm a", Locale.getDefault()).format(Date(now)),
-                  style = text(22, FontWeight.Medium, Color.White.copy(alpha = 0.75f)))
-            }
+            HomeClock(use24Hour, Modifier.weight(1f))
             if (heyPkg != null) {
               RoundGlassButton(onTap = { fireHey(context, heyPkg) }) { MicGlyphSmall() }
               Spacer(Modifier.width(14.dp))
@@ -767,6 +833,21 @@ private fun GlassHomeScreen(
               onDismiss = { settingsOpen = false })
         }
       }
+}
+
+/**
+ * The date and time at the top of the Home Screen. Its own scope, ticking each minute: it shows
+ * no seconds, and a tick read by the whole Home Screen recomposed fifteen app tiles every second.
+ */
+@Composable
+private fun HomeClock(use24Hour: Boolean, modifier: Modifier) {
+  val now = rememberNow(60_000)
+  Column(modifier) {
+    BasicText(DateFormatter.format(Date(now), "EEEEMMMMd").uppercase(Locale.getDefault()), style = text(22, color = Color.White.copy(alpha = 0.85f)))
+    BasicText(
+        SimpleDateFormat(if (use24Hour) "H:mm" else "h:mm a", Locale.getDefault()).format(Date(now)),
+        style = text(22, FontWeight.Medium, Color.White.copy(alpha = 0.75f)))
+  }
 }
 
 /** A downward swipe anywhere closes the Home Screen; sideways drags are left to the app pager. */
