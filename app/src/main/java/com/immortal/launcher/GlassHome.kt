@@ -354,7 +354,7 @@ fun GlassHome(actions: GlassActions) {
     val home by animateFloatAsState(if (layer == GlassLayer.Home) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "home")
     Box(Modifier.fillMaxSize().graphicsLayer { translationY = (1f - home) * size.height }) {
           GlassHomeScreen(
-              frost = homeFrost,
+              frost = { homeFrost },
               fallback = { Color(ui.palette()?.background ?: 0xFF1B2030) },
               weather = weather,
               use24Hour = use24Hour,
@@ -729,7 +729,8 @@ private const val PAGE_SIZE = 15
 
 @Composable
 private fun GlassHomeScreen(
-    frost: ImageBitmap?,
+    /** Read while drawing, so a new frost on each open doesn't recompose the Home Screen. */
+    frost: () -> ImageBitmap?,
     /** Read while drawing, so a face change doesn't recompose the Home Screen. */
     fallback: () -> Color,
     weather: GlassWeather?,
@@ -781,10 +782,11 @@ private fun GlassHomeScreen(
       Modifier.fillMaxSize()
           .clickable(remember { MutableInteractionSource() }, null) {}
           .swipeDownToClose(onClose)) {
-        // In its own layer: [fallback] follows the face, and redrawing it here alone keeps a swipe
-        // from re-recording the whole Home Screen behind it.
+        // In its own layer: the frost and [fallback] change on opens and swipes, and redrawing them
+        // here alone keeps those from re-recording the whole Home Screen in front.
         Spacer(
             Modifier.fillMaxSize().graphicsLayer().drawBehind {
+              val frost = frost()
               if (frost != null) drawImage(frost, dstSize = IntSize(size.width.toInt(), size.height.toInt()), filterQuality = FilterQuality.Low)
               else drawRect(fallback())
               drawRect(Brush.verticalGradient(listOf(Color(0x8A0C143C), Color(0xB3060A1E))))
