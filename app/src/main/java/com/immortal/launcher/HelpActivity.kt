@@ -100,7 +100,7 @@ private data class HelpPage(
     val linkUrl: String? = null,
 )
 
-private val helpPages =
+private val classicPages =
     listOf(
         HelpPage(
             glyph = ICON_HEART,
@@ -184,11 +184,33 @@ private val helpPages =
         ),
     )
 
+/** The same tour with the Glass home's gestures in place of the grid's folders and Calls tile. */
+private val glassPages =
+    classicPages.map { p ->
+      when (p.glyph) {
+        ICON_GRID ->
+            p.copy(
+                body =
+                    "Swipe left or right to change faces. Swipe up, or tap Home Screen, for your " +
+                        "apps, weather and Settings; swipe down to go back. Press and hold a face " +
+                        "to change its style, color or wallpaper. From inside any app, tap the " +
+                        "round home button to come straight back here.")
+        ICON_CALL ->
+            p.copy(
+                body =
+                    "Calling still works! Swipe up to the Home Screen and tap Calls, then pick " +
+                        "a person from the Portal's original screen that appears. When you've " +
+                        "finished your call, tap the home button to return.")
+        else -> p
+      }
+    }
+
 @Composable
 private fun HelpTour() {
   val context = LocalContext.current
   val activity = context as? Activity
   var page by remember { mutableIntStateOf(0) }
+  val helpPages = remember { if (ImmortalSettings.load(context).glassTheme) glassPages else classicPages }
   val last = helpPages.lastIndex
   val nextFocus = remember { FocusRequester() }
   LaunchedEffect(Unit) { runCatching { nextFocus.requestFocus() } }

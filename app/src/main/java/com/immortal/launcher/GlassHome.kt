@@ -8,6 +8,7 @@
 package com.immortal.launcher
 
 import android.app.Activity
+import androidx.compose.ui.composed
 import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
@@ -380,9 +381,16 @@ private enum class Gesture { Tap, Drag }
  * plain tap passes through to the tile. While [editing], every touch is the card's, so tiles under it
  * stay inert.
  */
-private fun Modifier.faceGestures(editing: Boolean, onEvent: (GlassEvent) -> Unit): Modifier =
-    pointerInput(editing) {
+private fun Modifier.faceGestures(editing: Boolean, onEvent: (GlassEvent) -> Unit): Modifier = composed {
+  // Read through state rather than keying pointerInput on it: a long press flips [editing], and
+  // restarting the detector then would drop the rest of that touch, letting its release reach the
+  // tile underneath as a tap.
+  val editingNow by rememberUpdatedState(editing)
+  val send by rememberUpdatedState(onEvent)
+  pointerInput(Unit) {
       awaitEachGesture {
+        val editing = editingNow
+        val onEvent = send
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         if (editing) down.consume()
         val slop = viewConfiguration.touchSlop
@@ -418,6 +426,7 @@ private fun Modifier.faceGestures(editing: Boolean, onEvent: (GlassEvent) -> Uni
         }
       }
     }
+}
 
 /** Swallows the rest of a gesture so nothing underneath reacts; returns where the finger lifted. */
 private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.consumeUntilUp(id: PointerId): Offset? {

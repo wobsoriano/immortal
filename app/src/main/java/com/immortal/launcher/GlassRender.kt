@@ -12,7 +12,8 @@ import android.graphics.Matrix
 import android.graphics.Shader
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -101,14 +102,24 @@ fun Modifier.pressable(press: Press, enabled: Boolean = true, onTap: () -> Unit)
           if (!enabled) Modifier
           else
               Modifier.pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                      scope.launch { press.progress.animateTo(1f, spring(0.5f, 300f)) }
-                      tryAwaitRelease()
-                      scope.launch { press.progress.animateTo(0f, spring(0.45f, 260f)) }
-                    },
-                    onTap = { tap() },
-                )
+                // Not detectTapGestures: that still taps after a short drag that ends inside the
+                // element, so a swipe starting on an icon could open it. Past touch slop it is a drag.
+                awaitEachGesture {
+                  val down = awaitFirstDown()
+                  scope.launch { press.progress.animateTo(1f, spring(0.5f, 300f)) }
+                  var tapped = false
+                  while (true) {
+                    val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                    if (c.isConsumed || (c.position - down.position).getDistance() > viewConfiguration.touchSlop) break
+                    if (!c.pressed) {
+                      tapped = true
+                      c.consume()
+                      break
+                    }
+                  }
+                  scope.launch { press.progress.animateTo(0f, spring(0.45f, 260f)) }
+                  if (tapped) tap()
+                }
               })
 }
 
