@@ -34,6 +34,9 @@
          writes fail. The user grants it interactively (SystemSounds.requestWriteAccess). -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <!-- The Glass home's Do Not Disturb tile. Policy access itself is granted over adb
+         (cmd notification allow_dnd <package>); the Portal has no settings screen for it. -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Gesture-wave-to-wake on the screensaver (GestureCamera). Optional feature so
          camera-less models still install. -->

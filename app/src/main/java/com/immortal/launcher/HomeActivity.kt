@@ -197,27 +197,43 @@ class HomeActivity : ComponentActivity() {
         runCatching { startActivity(Intent(this, HelpActivity::class.java)) }
       }
     }
+    glass = ImmortalSettings.load(this).glassTheme
     setContent {
       SampleAppTheme(darkTheme = true) {
-        LauncherScreen(
-            onLaunch = ::launchApp,
-            onOpenStore = ::openStore,
-            onOpenHelp = ::openHelp,
-            onStartScreensaver = ::startPhotoFrame,
-            onExitHome = ::launchStockHome,
-            onUninstall = { pkg ->
-              // System uninstall dialog; no special permission needed.
-              runCatching {
-                startActivity(
-                    Intent(Intent.ACTION_DELETE)
-                        .setData(android.net.Uri.parse("package:$pkg"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-              }
-            },
-        )
+        if (glass) {
+          GlassHome(
+              GlassActions(
+                  launch = ::launchApp,
+                  openStore = ::openStore,
+                  openHelp = ::openHelp,
+                  photoFrame = ::startPhotoFrame,
+                  calls = ::launchStockHome,
+              ))
+        } else {
+          LauncherScreen(
+              onLaunch = ::launchApp,
+              onOpenStore = ::openStore,
+              onOpenHelp = ::openHelp,
+              onStartScreensaver = ::startPhotoFrame,
+              onExitHome = ::launchStockHome,
+              onUninstall = { pkg ->
+                // System uninstall dialog; no special permission needed.
+                runCatching {
+                  startActivity(
+                      Intent(Intent.ACTION_DELETE)
+                          .setData(android.net.Uri.parse("package:$pkg"))
+                          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+              },
+          )
+        }
       }
     }
   }
+
+  // Which home tree to show: the Glass theme or the original grid. Re-read on resume so flipping
+  // the setting applies the moment the user comes back from Immortal Settings.
+  private var glass by mutableStateOf(false)
 
   private fun launchApp(cn: ComponentName) {
     runCatching {
@@ -253,6 +269,7 @@ class HomeActivity : ComponentActivity() {
   // settings, put them back every time Immortal comes to the foreground.
   override fun onResume() {
     super.onResume()
+    glass = ImmortalSettings.load(this).glassTheme
     // The user is back on Immortal, so any stock-launcher call handoff is over:
     // allow the photo frame to resume its normal screensaver behaviour.
     DreamPolicy.clearBridge(this)

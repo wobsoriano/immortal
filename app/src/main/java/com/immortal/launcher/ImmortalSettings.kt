@@ -83,6 +83,9 @@ object ImmortalSettings {
       // using the whole panel. Off by default — most users want the full screen; turning it
       // on restores the centred, constrained grid.
       val constrainPageWidth: Boolean = false,
+      // The Glass home: a face carousel with a swipe-up Home Screen, drawn as liquid glass. On by
+      // default in this build; off restores the original grid home.
+      val glassTheme: Boolean = true,
       // Multi-room audio: when this Portal is a Snapcast speaker, surface what the
       // group is playing on the now-playing card (read from the Music Assistant /
       // snapserver at [snapcastHost]). Off until configured.
@@ -123,6 +126,7 @@ object ImmortalSettings {
         portalPresence = p.getBoolean("portal_presence", true),
         hideStatusBar = p.getBoolean("hide_status_bar", true),
         constrainPageWidth = p.getBoolean("constrain_page_width", false),
+        glassTheme = p.getBoolean("glass_theme", true),
         multiRoomEnabled = p.getBoolean("multiroom_enabled", false),
         snapcastHost = p.getString("snapcast_host", "") ?: "",
         maPort = p.getInt("ma_port", DEFAULT_MA_PORT),
@@ -280,6 +284,8 @@ object ImmortalSettings {
 
   fun setConstrainPageWidth(c: Context, on: Boolean) =
       prefs(c).edit().putBoolean("constrain_page_width", on).apply()
+
+  fun setGlassTheme(c: Context, on: Boolean) = prefs(c).edit().putBoolean("glass_theme", on).apply()
 
   /**
    * Whether the clock should render in 24-hour form. AUTO follows the device's

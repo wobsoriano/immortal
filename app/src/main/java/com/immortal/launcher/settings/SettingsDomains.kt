@@ -634,6 +634,14 @@ object SettingsDomains {
                       help =
                           "Hidden by default for a cleaner full-screen look. Swipe down from the top to reveal it briefly."),
                   BoolSpec(
+                      "glassTheme",
+                      "Glass home",
+                      get = { it.glassTheme },
+                      set = ImmortalSettings::setGlassTheme,
+                      help =
+                          "Clock faces you swipe between, with your apps one swipe up, drawn as frosted " +
+                              "glass. Turn off for the original app grid."),
+                  BoolSpec(
                       "constrainPageWidth",
                       "Constrain page width",
                       get = { it.constrainPageWidth },
@@ -739,6 +747,7 @@ object SettingsDomains {
                   "showMiniPlayer" to "Home screen",
                   "hideStatusBar" to "Home screen",
                   "constrainPageWidth" to "Home screen",
+                  "glassTheme" to "Home screen",
                   "clockFormat" to "Clock",
                   "portalPresence" to "Presence",
                   "multiRoomEnabled" to "Audio",
