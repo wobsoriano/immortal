@@ -22,13 +22,10 @@ import android.provider.Settings
 import android.view.PixelCopy
 import android.view.Window
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -59,6 +56,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -87,6 +85,7 @@ import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -104,6 +103,7 @@ import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -133,6 +133,9 @@ fun GlassHome(actions: GlassActions) {
   var ui by remember { mutableStateOf(GlassPrefs.load(context)) }
   val scope = rememberCoroutineScope()
   var homeFrost by remember { mutableStateOf<ImageBitmap?>(null) }
+  // Face transitions: the face being left, and how far the new one has slid in (0 to 1).
+  var leaving by remember { mutableStateOf<GlassFace?>(null) }
+  val slide = remember { Animatable(1f) }
   fun send(e: GlassEvent) {
     if (e == GlassEvent.SwipeUp && ui.layer == GlassLayer.Faces) {
       // The Home Screen sits on a blur of whatever the face shows right now, hands and tiles included.
@@ -142,7 +145,17 @@ fun GlassHome(actions: GlassActions) {
       }
       return
     }
-    ui = ui.reduce(e)
+    val next = ui.reduce(e)
+    if (next.face != ui.face) {
+      leaving = ui.face
+      // Undispatched, so the slide restarts from 0 in the same frame the new face is chosen.
+      scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        slide.snapTo(0f)
+        slide.animateTo(1f, tween(400, easing = FastOutSlowInEasing))
+        leaving = null
+      }
+    }
+    ui = next
   }
   LaunchedEffect(ui.face, ui.looks) { GlassPrefs.save(context, ui) }
   // Always on: as the home screen, Back on a face must not finish us and expose whatever task is below.
@@ -258,42 +271,55 @@ fun GlassHome(actions: GlassActions) {
               }
             }
             .faceGestures(editing = ui.layer == GlassLayer.Edit, onEvent = ::send)) {
-          AnimatedContent(
-              targetState = ui.face,
-              // The incoming face slides over the outgoing one, which drifts back at a quarter of the
-              // speed. No fades: an alpha transition renders both faces offscreen, and that fill cost
-              // made a third of the frames janky on the Gen-1 Portal's GPU.
-              transitionSpec = {
-                val dir = ui.direction
-                slideInHorizontally(tween(400, easing = FastOutSlowInEasing)) { dir * it }
-                    .togetherWith(slideOutHorizontally(tween(400, easing = FastOutSlowInEasing)) { -dir * it / 4 })
-              },
-              label = "face") { face ->
-                val palette = ui.palette(face)
-                when (face) {
-                  GlassFace.Portal ->
-                      PortalFace(
-                          portalBackdrop,
-                          portalLayout,
-                          deviceState,
-                          keepAwake,
-                          museReady,
-                          PortalActions(
-                              photoFrame = actions.photoFrame,
-                              heyMuse = { heyMuse(context) },
-                              volume = { delta -> control { device.stepVolume(delta) } },
-                              dnd = { control { device.toggleDnd() } },
-                              screen = { keepAwake = !keepAwake },
-                              brightness = { control { device.stepBrightness() } },
-                          ))
-                  GlassFace.Numerals -> NumeralsFace(palette!!, ui.look(face).style)
-                  GlassFace.Modular -> ModularFace(palette!!, ui.look(face).style, weather, agenda, use24Hour)
-                  GlassFace.Photo -> PhotoFace(photoBackdrop, use24Hour)
-                }
-              }
+          // Every face stays composed and in the render tree; the ones not on screen are parked
+          // beside it. A swipe then only moves two layers. Composing a face as it slid in cost a
+          // 60-120 ms first frame on the Gen-1 Portal, and the double-buffered pipeline stayed a
+          // frame behind for the rest of the slide. The incoming face slides over the outgoing one,
+          // which drifts back at a quarter of the speed. No fades: an alpha transition renders both
+          // faces offscreen, and that fill cost made a third of the frames janky.
+          val dir = ui.direction
+          GlassFace.entries.forEach { face ->
+            key(face) {
+              val incoming = face == ui.face
+              val outgoing = !incoming && face == leaving
+              Box(
+                  Modifier.fillMaxSize().zIndex(if (incoming) 1f else 0f).graphicsLayer {
+                    translationX =
+                        when {
+                          incoming -> dir * size.width * (1f - slide.value)
+                          outgoing -> -dir * size.width / 4f * slide.value
+                          else -> PARKED * size.width
+                        }
+                  }) {
+                    val palette = ui.palette(face)
+                    when (face) {
+                      GlassFace.Portal ->
+                          PortalFace(
+                              portalBackdrop,
+                              portalLayout,
+                              deviceState,
+                              keepAwake,
+                              museReady,
+                              PortalActions(
+                                  photoFrame = actions.photoFrame,
+                                  heyMuse = { heyMuse(context) },
+                                  volume = { delta -> control { device.stepVolume(delta) } },
+                                  dnd = { control { device.toggleDnd() } },
+                                  screen = { keepAwake = !keepAwake },
+                                  brightness = { control { device.stepBrightness() } },
+                              ))
+                      GlassFace.Numerals -> NumeralsFace(palette!!, ui.look(face).style)
+                      GlassFace.Modular -> ModularFace(palette!!, ui.look(face).style, weather, agenda, use24Hour)
+                      GlassFace.Photo -> PhotoFace(photoBackdrop, use24Hour)
+                    }
+                  }
+            }
+          }
         }
 
-    if (ui.layer == GlassLayer.Faces) {
+    // Parked rather than removed under the Home Screen and edit mode, so closing those doesn't
+    // compose the chrome again mid-slide.
+    Box(Modifier.parked(ui.layer != GlassLayer.Faces)) {
       FaceChrome(
           ui = ui,
           museReady = museReady && ui.face != GlassFace.Portal,
@@ -303,14 +329,11 @@ fun GlassHome(actions: GlassActions) {
     }
     if (edit > 0f) EditRail(ui, wallpapers, alpha = edit, onEvent = ::send)
 
-    // The Home Screen stays composed and is only placed while it is open, so opening it costs a
-    // layout per frame rather than composing fifteen app tiles mid-slide.
+    // The Home Screen stays composed and drawn, parked just below the screen while closed, so
+    // opening it only moves a layer. Unplacing it dropped its display lists from the render tree,
+    // and re-recording fifteen app tiles cost the first frame of every open about 30 ms.
     val home by animateFloatAsState(if (ui.layer == GlassLayer.Home) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "home")
-    Box(
-        Modifier.fillMaxSize().layout { m, c ->
-          val p = m.measure(c)
-          layout(p.width, p.height) { if (home > 0f) p.place(0, ((1f - home) * p.height).roundToInt()) }
-        }) {
+    Box(Modifier.fillMaxSize().graphicsLayer { translationY = (1f - home) * size.height }) {
           GlassHomeScreen(
               frost = homeFrost,
               fallback = Color(ui.palette()?.background ?: 0xFF1B2030),
@@ -337,6 +360,16 @@ private suspend fun captureFrost(window: Window, width: Int, height: Int): Image
   if (!copied) return null
   return withContext(Dispatchers.Default) { stackBlurred(shot, 6).asImageBitmap() }
 }
+
+/** Where a face that isn't showing waits, in screen widths: off screen, so it draws and hit-tests nothing. */
+private const val PARKED = 2f
+
+/**
+ * Moves an element off screen instead of removing it. It stays composed and keeps its display
+ * lists and layers on the render thread, so bringing it back costs a frame no more than any other.
+ */
+private fun Modifier.parked(parked: Boolean): Modifier =
+    fillMaxSize().graphicsLayer { translationX = if (parked) PARKED * size.width else 0f }
 
 /** Space kept under the Portal face's tiles for the page dots and the Home Screen pill. */
 private const val CHROME_HEIGHT = 56f
