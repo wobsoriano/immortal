@@ -86,7 +86,13 @@ sealed interface GlassEvent {
   data class PickColor(val index: Int) : GlassEvent
 
   data object Done : GlassEvent
+
+  /** How many wallpaper images are on the device; they join the Portal face's colors. */
+  data class WallpapersFound(val count: Int) : GlassEvent
 }
+
+/** The most wallpapers the Portal face offers, and so the highest color index a saved choice may hold. */
+const val MAX_WALLPAPERS = 12
 
 data class GlassUi(
     val face: GlassFace = GlassFace.Portal,
@@ -95,8 +101,17 @@ data class GlassUi(
     val colorsOpen: Boolean = false,
     /** Direction of the last face change, so the transition slides the right way. */
     val direction: Int = 1,
+    /** Wallpaper images found on the device, offered after the Portal face's own colors. */
+    val wallpapers: Int = 0,
 ) {
   fun look(f: GlassFace = face): FaceLook = looks[f] ?: FaceLook()
+
+  /** The colors a face offers, then (Portal only) one choice per wallpaper. */
+  fun choices(f: GlassFace = face): Int = f.palettes.size + if (f == GlassFace.Portal) wallpapers else 0
+
+  /** Which wallpaper the face shows, or null when it shows one of its colors. */
+  fun wallpaper(f: GlassFace = face): Int? =
+      (look(f).color - f.palettes.size).takeIf { f == GlassFace.Portal && it in 0 until wallpapers }
 
   fun palette(f: GlassFace = face): FacePalette? =
       f.palettes.getOrNull(look(f).color.coerceIn(0, (f.palettes.size - 1).coerceAtLeast(0)))
@@ -123,11 +138,12 @@ data class GlassUi(
             if (layer != GlassLayer.Edit || face.styles < 2) this
             else withLook(look().copy(style = (look().style + 1) % face.styles))
         GlassEvent.ToggleColors ->
-            if (layer != GlassLayer.Edit || face.palettes.size < 2) this
+            if (layer != GlassLayer.Edit || choices() < 2) this
             else copy(colorsOpen = !colorsOpen)
         is GlassEvent.PickColor ->
-            if (layer != GlassLayer.Edit || e.index !in face.palettes.indices) this
+            if (layer != GlassLayer.Edit || e.index !in 0 until choices()) this
             else withLook(look().copy(color = e.index))
+        is GlassEvent.WallpapersFound -> copy(wallpapers = e.count.coerceIn(0, MAX_WALLPAPERS))
       }
 
   private fun withLook(l: FaceLook) = copy(looks = looks + (face to l))
@@ -147,7 +163,8 @@ object GlassPrefsCodec {
             .mapNotNull { part ->
               val bits = part.split(':')
               val f = GlassFace.entries.firstOrNull { it.name == bits.getOrNull(0) } ?: return@mapNotNull null
-              val color = bits.getOrNull(1)?.toIntOrNull()?.takeIf { it in f.palettes.indices } ?: 0
+              val most = f.palettes.size + if (f == GlassFace.Portal) MAX_WALLPAPERS else 0
+              val color = bits.getOrNull(1)?.toIntOrNull()?.takeIf { it in 0 until most } ?: 0
               val style = bits.getOrNull(2)?.toIntOrNull()?.takeIf { it in 0 until f.styles } ?: 0
               f to FaceLook(color, style)
             }

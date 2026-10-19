@@ -168,6 +168,8 @@ fun GlassHome(actions: GlassActions) {
     }
   }
   DeviceWatcher { control {} }
+  var weatherPlace by remember { mutableStateOf(Weather.locationLabel(context)) }
+  var wallpaperFiles by remember { mutableStateOf(glassWallpapers(context)) }
   val lifecycleOwner = LocalLifecycleOwner.current
   DisposableEffect(lifecycleOwner) {
     val obs = LifecycleEventObserver { _, e ->
@@ -176,6 +178,8 @@ fun GlassHome(actions: GlassActions) {
         museReady = museInstalled(context)
         use24Hour = ImmortalSettings.use24HourClock(context)
         heyPkg = heyPackage(context)
+        weatherPlace = Weather.locationLabel(context)
+        wallpaperFiles = glassWallpapers(context)
       }
     }
     lifecycleOwner.lifecycle.addObserver(obs)
@@ -183,7 +187,7 @@ fun GlassHome(actions: GlassActions) {
   }
 
   val weather by
-      produceState<GlassWeather?>(null) {
+      produceState<GlassWeather?>(null, weatherPlace) {
         while (true) {
           val w = withContext(Dispatchers.IO) { fetchGlassWeather(context) }
           if (w != null) value = w
@@ -204,6 +208,11 @@ fun GlassHome(actions: GlassActions) {
           delay(30L * 60 * 1000)
         }
       }
+  val wallpapers by
+      produceState(emptyList<Wallpaper>(), wallpaperFiles) {
+        value = withContext(Dispatchers.IO) { wallpaperFiles.mapNotNull { f -> loadWallpaper(f, 96)?.let { Wallpaper(f, it.asImageBitmap()) } } }
+      }
+  LaunchedEffect(wallpapers.size) { send(GlassEvent.WallpapersFound(wallpapers.size)) }
   val selfUpdate = rememberSelfUpdate()
   var timerRinging by remember { mutableStateOf(TimerStore.load(context).ringing) }
   DisposableEffect(Unit) {
@@ -217,9 +226,15 @@ fun GlassHome(actions: GlassActions) {
     val h = constraints.maxHeight
     val portalLayout = remember(w, h) { portalLayout(Size(w.toFloat(), h.toFloat() - CHROME_HEIGHT)) }
     val portalColor = ui.palette(GlassFace.Portal)!!.background
+    val portalWallpaper = ui.wallpaper(GlassFace.Portal)?.let { wallpapers.getOrNull(it)?.file }
     val portalBackdrop by
-        produceState<GlassBackdrop?>(null, w, h, portalColor) {
-          value = withContext(Dispatchers.Default) { buildGlassBackdrop(angledPanels(portalColor), w, h, portalLayout.values) }
+        produceState<GlassBackdrop?>(null, w, h, portalColor, portalWallpaper) {
+          value =
+              withContext(Dispatchers.Default) {
+                val image = portalWallpaper?.let { loadWallpaper(it) }
+                val source = if (image != null) photoBackground(image) else angledPanels(portalColor)
+                buildGlassBackdrop(source, w, h, portalLayout.values)
+              }
         }
     val photoBackdrop by
         produceState<GlassBackdrop?>(null, w, h, photo) {
@@ -285,7 +300,7 @@ fun GlassHome(actions: GlassActions) {
           onHome = { send(GlassEvent.SwipeUp) },
           onDot = { send(GlassEvent.GoTo(it)) })
     }
-    if (edit > 0f) EditRail(ui, alpha = edit, onEvent = ::send)
+    if (edit > 0f) EditRail(ui, wallpapers, alpha = edit, onEvent = ::send)
 
     // The Home Screen stays composed and is only placed while it is open, so opening it costs a
     // layout per frame rather than composing fifteen app tiles mid-slide.
@@ -479,7 +494,7 @@ private fun Chevron(up: Boolean, size: Int, color: Color = Color.White) {
 // --- edit mode ------------------------------------------------------------------------------
 
 @Composable
-private fun EditRail(ui: GlassUi, alpha: Float, onEvent: (GlassEvent) -> Unit) {
+private fun EditRail(ui: GlassUi, wallpapers: List<Wallpaper>, alpha: Float, onEvent: (GlassEvent) -> Unit) {
   Box(Modifier.fillMaxSize().graphicsLayer { this.alpha = alpha }) {
     BasicText(
         ui.face.label,
@@ -494,23 +509,34 @@ private fun EditRail(ui: GlassUi, alpha: Float, onEvent: (GlassEvent) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally) {
           RailButton("Style", enabled = ui.face.styles > 1, onTap = { onEvent(GlassEvent.CycleStyle) }) { StyleGlyph(it) }
-          RailButton("Color", enabled = ui.face.palettes.size > 1, onTap = { onEvent(GlassEvent.ToggleColors) }) { PaletteGlyph(it) }
+          RailButton("Color", enabled = ui.choices() > 1, onTap = { onEvent(GlassEvent.ToggleColors) }) { PaletteGlyph(it) }
           RailButton("Done", on = true, onTap = { onEvent(GlassEvent.Done) }) { CheckGlyph(it) }
         }
     if (ui.colorsOpen) {
-      Column(
-          Modifier.offset(x = 880.dp, y = 210.dp).frosted(radius = 40f).padding(18.dp),
-          verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            ui.face.palettes.forEachIndexed { i, p ->
-              val picked = ui.look().color == i
-              Box(
-                  Modifier.size(56.dp)
-                      .clip(CircleShape)
-                      .background(if (picked) Color.White else Color.White.copy(alpha = 0.35f))
-                      .padding(if (picked) 4.dp else 2.dp)
-                      .clip(CircleShape)
-                      .background(Color(p.background))
-                      .clickable(remember { MutableInteractionSource() }, null) { onEvent(GlassEvent.PickColor(i)) })
+      // Colors first, then wallpapers; two columns once there are too many for one.
+      val count = ui.choices()
+      val twoColumns = count > 6
+      Row(
+          Modifier.offset(x = if (twoColumns) 810.dp else 880.dp, y = if (twoColumns) 130.dp else 210.dp)
+              .frosted(radius = 40f)
+              .padding(18.dp),
+          horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            (0 until count).chunked(if (twoColumns) (count + 1) / 2 else count).forEach { column ->
+              Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                column.forEach { i ->
+                  val picked = ui.look().color == i
+                  val swatch =
+                      Modifier.size(56.dp)
+                          .clip(CircleShape)
+                          .background(if (picked) Color.White else Color.White.copy(alpha = 0.35f))
+                          .padding(if (picked) 4.dp else 2.dp)
+                          .clip(CircleShape)
+                          .clickable(remember { MutableInteractionSource() }, null) { onEvent(GlassEvent.PickColor(i)) }
+                  val palette = ui.face.palettes.getOrNull(i)
+                  if (palette != null) Box(swatch.background(Color(palette.background)))
+                  else wallpapers.getOrNull(i - ui.face.palettes.size)?.let { Image(it.thumb, null, swatch, contentScale = ContentScale.Crop) }
+                }
+              }
             }
           }
     }
@@ -917,3 +943,6 @@ private object GlassGlyphs {
   const val GEAR =
       "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"
 }
+
+/** A wallpaper file and the small copy its swatch shows. */
+private class Wallpaper(val file: java.io.File, val thumb: ImageBitmap)

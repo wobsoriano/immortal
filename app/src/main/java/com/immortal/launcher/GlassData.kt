@@ -140,6 +140,19 @@ fun fetchTodayAgenda(context: Context): List<AgendaItem>? {
  * A photo for the Photo face from the frame's own sources, without the network: the configured
  * folder, else the frame's media cache, else the bundled fallback photos.
  */
+/**
+ * Wallpapers the user copied to the device, in name order. They live outside the APK so images we
+ * may not redistribute never ship in it: adb push them to Android/data/<package>/files/wallpapers/.
+ */
+fun glassWallpapers(context: Context): List<File> =
+    context.getExternalFilesDir("wallpapers")
+        ?.listFiles { f -> f.isFile && f.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp") }
+        ?.sortedBy { it.name }
+        ?.take(MAX_WALLPAPERS)
+        .orEmpty()
+
+fun loadWallpaper(file: File, maxEdge: Int = 1600): Bitmap? = decodeBounded(file.readBytesOrNull(), maxEdge)
+
 fun pickGlassPhoto(context: Context): Bitmap? {
   val settings = ScreensaverConfig.load(context)
   val candidates = buildList {

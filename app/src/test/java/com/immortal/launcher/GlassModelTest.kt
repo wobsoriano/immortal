@@ -172,4 +172,25 @@ class GlassModelTest {
     assertTrue(red(10, 10) > red(11, 10) && red(11, 10) > red(12, 10))
     assertEquals(0, red(14, 10))
   }
+
+  @Test
+  fun wallpapersAreExtraPortalChoicesAfterItsColors() {
+    val colors = GlassFace.Portal.palettes.size
+    val edit = GlassUi(face = GlassFace.Portal).run(GlassEvent.WallpapersFound(4), GlassEvent.LongPress)
+    assertEquals(colors + 4, edit.choices())
+    val picked = edit.run(GlassEvent.PickColor(colors + 2))
+    assertEquals(2, picked.wallpaper())
+    assertEquals(null, edit.run(GlassEvent.PickColor(1)).wallpaper())
+    assertSame(edit, edit.reduce(GlassEvent.PickColor(colors + 4)))
+    assertEquals(GlassFace.Modular.palettes.size, edit.choices(GlassFace.Modular))
+  }
+
+  @Test
+  fun aSavedWallpaperSurvivesUntilItsFileIsGone() {
+    val colors = GlassFace.Portal.palettes.size
+    val saved = GlassPrefsCodec.decode("Portal|Portal:${colors + 1}:0")
+    assertEquals(null, saved.wallpaper())
+    assertEquals(1, saved.reduce(GlassEvent.WallpapersFound(3)).wallpaper())
+    assertEquals(null, saved.reduce(GlassEvent.WallpapersFound(1)).wallpaper())
+  }
 }
