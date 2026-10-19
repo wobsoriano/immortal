@@ -47,7 +47,6 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathOperation
-import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -122,6 +121,12 @@ private fun DrawScope.hand(c: Offset, turns: Float, length: Float, width: Float,
       if (outline != null) drawLine(outline, Offset(c.x, c.y + tail), Offset(c.x, c.y - length), width + 8f, StrokeCap.Round)
       drawLine(color, Offset(c.x, c.y + tail), Offset(c.x, c.y - length), width, StrokeCap.Round)
     }
+
+/**
+ * Caches a face's slow-changing content as a texture. Text this large is drawn as paths, which the
+ * Gen-1 GPU re-rasterised on every frame of a face transition; as a layer it is drawn once per change.
+ */
+private fun Modifier.staticLayer() = graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
 
 // --- Portal face -------------------------------------------------------------------------------
 
@@ -356,8 +361,9 @@ fun NumeralsFace(palette: FacePalette, style: Int) {
   val ink = Color(palette.ink)
   val measurer = rememberTextMeasurer()
   val weight = if (style == 0) FontWeight.Bold else FontWeight.Light
-  Box(
-      Modifier.fillMaxSize().drawWithCache {
+  Box(Modifier.fillMaxSize()) {
+    Box(
+      Modifier.fillMaxSize().staticLayer().drawWithCache {
         val fontPx = 360.sp.toPx()
         val numeral = TextStyle(color = ink, fontFamily = Figtree, fontWeight = weight, fontSize = 360.sp, letterSpacing = (-12).sp)
         val twelve = measurer.measure("12", numeral)
@@ -375,7 +381,7 @@ fun NumeralsFace(palette: FacePalette, style: Int) {
           drawText(nine, topLeft = Offset(0.13f * w, h / 2 - (nine.firstBaseline - cap / 2)))
           drawText(three, topLeft = Offset(0.87f * w - three.size.width, h / 2 - (three.firstBaseline - cap / 2)))
         }
-      }) {
+      })
         val now = rememberNow()
         val calendar = remember { Calendar.getInstance() }
         Canvas(Modifier.fillMaxSize().graphicsLayer()) {
@@ -399,7 +405,8 @@ fun ModularFace(palette: FacePalette, style: Int, weather: GlassWeather?, agenda
   val now = rememberNow(60_000)
   val date = Date(now)
   val heavy = if (style == 0) FontWeight.Bold else FontWeight.Light
-  Box(Modifier.fillMaxSize().drawBehind { drawRect(Color(palette.background)) }) {
+  Box(Modifier.fillMaxSize()) {
+   Box(Modifier.fillMaxSize().staticLayer().drawBehind { drawRect(Color(palette.background)) }) {
     Column(Modifier.offset(72.dp, 48.dp)) {
       BasicText(
           buildAnnotatedString {
@@ -413,7 +420,7 @@ fun ModularFace(palette: FacePalette, style: Int, weather: GlassWeather?, agenda
           Modifier.offset(y = (-24).dp),
           style = TextStyle(color = ink, fontFamily = Figtree, fontWeight = heavy, fontSize = 250.sp, lineHeight = 250.sp, letterSpacing = (-8).sp))
     }
-    ModularClock(ink, Modifier.offset(820.dp, 40.dp).size(340.dp))
+    ModularDial(ink, Modifier.offset(820.dp, 40.dp).size(340.dp))
     Column(Modifier.offset(72.dp, 452.dp).width(640.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
       when {
         agenda == null -> AgendaNote(ink, "No calendar yet", "Add one in Screensaver settings")
@@ -432,6 +439,8 @@ fun ModularFace(palette: FacePalette, style: Int, weather: GlassWeather?, agenda
         if (weather.hi != null && weather.lo != null) BasicText("H:${weather.hi}° L:${weather.lo}°", style = text(26, FontWeight.Medium, ink.copy(alpha = 0.85f)))
       }
     }
+   }
+    ModularHands(ink, Modifier.offset(820.dp, 40.dp).size(340.dp))
   }
 }
 
@@ -464,7 +473,7 @@ private fun AgendaRow(ink: Color, item: AgendaItem, use24Hour: Boolean) {
 }
 
 @Composable
-private fun ModularClock(ink: Color, modifier: Modifier) {
+private fun ModularDial(ink: Color, modifier: Modifier) {
   val measurer = rememberTextMeasurer()
   Box(
       modifier.drawWithCache {
@@ -484,19 +493,22 @@ private fun ModularClock(ink: Color, modifier: Modifier) {
             drawText(l, topLeft = Offset(x - l.size.width / 2, y - l.size.height / 2))
           }
         }
-      }) {
-        val now = rememberNow()
-        val calendar = remember { Calendar.getInstance() }
-        Canvas(Modifier.fillMaxSize().graphicsLayer()) {
-          val t = handTurns(now, calendar)
-          val c = center
-          val r = size.minDimension / 2
-          hand(c, t.hour, r * 0.5f, 9f, ink)
-          hand(c, t.minute, r * 0.76f, 6f, ink)
-          hand(c, t.second, r * 0.88f, 2.5f, Color.White, tail = r * 0.12f)
-          drawCircle(Color.White, 6f, c)
-        }
-      }
+      })
+}
+
+@Composable
+private fun ModularHands(ink: Color, modifier: Modifier) {
+  val now = rememberNow()
+  val calendar = remember { Calendar.getInstance() }
+  Canvas(modifier.graphicsLayer()) {
+    val t = handTurns(now, calendar)
+    val c = center
+    val r = size.minDimension / 2
+    hand(c, t.hour, r * 0.5f, 9f, ink)
+    hand(c, t.minute, r * 0.76f, 6f, ink)
+    hand(c, t.second, r * 0.88f, 2.5f, Color.White, tail = r * 0.12f)
+    drawCircle(Color.White, 6f, c)
+  }
 }
 
 // --- Photo face --------------------------------------------------------------------------------
@@ -504,14 +516,13 @@ private fun ModularClock(ink: Color, modifier: Modifier) {
 /** The photo frame's current picture with a large clock over it. */
 @Composable
 fun PhotoFace(backdrop: GlassBackdrop?, use24Hour: Boolean) {
-  val now = rememberNow(1000)
+  val now = rememberNow(60_000)
   val date = Date(now)
-  val shadow = Shadow(Color(0x66000000), Offset(0f, 8f), 36f)
-  Box(Modifier.fillMaxSize().drawBehind { backdrop?.let { drawImage(it.sharp) } ?: drawRect(Color(0xFF202431)) }) {
+  Box(Modifier.fillMaxSize().staticLayer().drawBehind { backdrop?.let { drawImage(it.sharp) } ?: drawRect(Color(0xFF202431)) }) {
     Column(Modifier.fillMaxWidth().padding(top = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
       BasicText(
           DateFormatter.format(date, "EEEEMMMMd"),
-          style = text(34, color = Color.White.copy(alpha = 0.94f), align = TextAlign.Center).copy(shadow = shadow))
+          style = text(34, color = Color.White.copy(alpha = 0.94f), align = TextAlign.Center))
       BasicText(
           SimpleDateFormat(if (use24Hour) "H:mm" else "h:mm", Locale.getDefault()).format(date),
           style =
@@ -521,8 +532,7 @@ fun PhotoFace(backdrop: GlassBackdrop?, use24Hour: Boolean) {
                   fontWeight = FontWeight.Bold,
                   fontSize = 300.sp,
                   lineHeight = 300.sp,
-                  letterSpacing = (-10).sp,
-                  shadow = shadow))
+                  letterSpacing = (-10).sp))
     }
   }
 }

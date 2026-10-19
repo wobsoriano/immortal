@@ -22,16 +22,11 @@ import android.view.PixelCopy
 import android.view.Window
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -90,6 +85,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -106,6 +102,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -246,10 +243,13 @@ fun GlassHome(actions: GlassActions) {
             .faceGestures(editing = ui.layer == GlassLayer.Edit, onEvent = ::send)) {
           AnimatedContent(
               targetState = ui.face,
+              // The incoming face slides over the outgoing one, which drifts back at a quarter of the
+              // speed. No fades: an alpha transition renders both faces offscreen, and that fill cost
+              // made a third of the frames janky on the Gen-1 Portal's GPU.
               transitionSpec = {
                 val dir = ui.direction
-                (slideInHorizontally(tween(420, easing = FastOutSlowInEasing)) { dir * it / 5 } + fadeIn(tween(320)))
-                    .togetherWith(slideOutHorizontally(tween(420, easing = FastOutSlowInEasing)) { -dir * it / 6 } + fadeOut(tween(260)))
+                slideInHorizontally(tween(400, easing = FastOutSlowInEasing)) { dir * it }
+                    .togetherWith(slideOutHorizontally(tween(400, easing = FastOutSlowInEasing)) { -dir * it / 4 })
               },
               label = "face") { face ->
                 val palette = ui.palette(face)
@@ -286,21 +286,24 @@ fun GlassHome(actions: GlassActions) {
     }
     if (edit > 0f) EditRail(ui, alpha = edit, onEvent = ::send)
 
-    AnimatedVisibility(
-        visible = ui.layer == GlassLayer.Home,
-        enter = slideInVertically(tween(420, easing = FastOutSlowInEasing)) { it / 6 } + fadeIn(tween(300)),
-        exit = slideOutVertically(tween(320)) { it / 6 } + fadeOut(tween(240)),
-    ) {
-      GlassHomeScreen(
-          frost = homeFrost,
-          fallback = Color(ui.palette()?.background ?: 0xFF1B2030),
-          weather = weather,
-          use24Hour = use24Hour,
-          heyPkg = heyPkg,
-          selfUpdate = selfUpdate,
-          actions = actions,
-          onClose = { send(GlassEvent.Back) })
-    }
+    // The Home Screen stays composed and is only placed while it is open, so opening it costs a
+    // layout per frame rather than composing fifteen app tiles mid-slide.
+    val home by animateFloatAsState(if (ui.layer == GlassLayer.Home) 1f else 0f, tween(380, easing = FastOutSlowInEasing), label = "home")
+    Box(
+        Modifier.fillMaxSize().layout { m, c ->
+          val p = m.measure(c)
+          layout(p.width, p.height) { if (home > 0f) p.place(0, ((1f - home) * p.height).roundToInt()) }
+        }) {
+          GlassHomeScreen(
+              frost = homeFrost,
+              fallback = Color(ui.palette()?.background ?: 0xFF1B2030),
+              weather = weather,
+              use24Hour = use24Hour,
+              heyPkg = heyPkg,
+              selfUpdate = selfUpdate,
+              actions = actions,
+              onClose = { send(GlassEvent.Back) })
+        }
 
     if (timerRinging) TimerAlarmOverlay(onStop = { TimerAlarm.stop(context) })
   }
@@ -645,9 +648,8 @@ private fun GlassHomeScreen(
             drawRect(Brush.verticalGradient(listOf(Color(0x8A0C143C), Color(0xB3060A1E))))
           }
           .clickable(remember { MutableInteractionSource() }, null) {}
-          .swipeDownToClose(onClose)
-          .padding(start = 48.dp, end = 48.dp, top = 36.dp)) {
-        Column(Modifier.fillMaxSize()) {
+          .swipeDownToClose(onClose)) {
+        Column(Modifier.fillMaxSize().padding(start = 48.dp, end = 48.dp, top = 36.dp)) {
           Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
               BasicText(DateFormatter.format(Date(now), "EEEEMMMMd").uppercase(Locale.getDefault()), style = text(22, color = Color.White.copy(alpha = 0.85f)))
@@ -868,12 +870,13 @@ private enum class SettingsTarget { Immortal, Screensaver, Help }
 @Composable
 private fun SettingsSheet(apps: List<AppEntry>, onLaunch: (ComponentName) -> Unit, onOpen: (SettingsTarget) -> Unit, onDismiss: () -> Unit) {
   Box(
-      Modifier.fillMaxSize().background(Color(0x66000000)).clickable(remember { MutableInteractionSource() }, null) { onDismiss() },
+      Modifier.fillMaxSize().background(Color(0x8C000000)).clickable(remember { MutableInteractionSource() }, null) { onDismiss() },
       contentAlignment = Alignment.Center) {
         Column(
             Modifier.width(560.dp)
                 .clickable(remember { MutableInteractionSource() }, null) {}
-                .frosted(radius = 44f, fill = Color(0xE6232838))
+                .background(Color(0xFA1C2030), RoundedCornerShape(44.dp))
+                .frosted(radius = 44f, fill = Color.Transparent)
                 .padding(vertical = 18.dp)) {
               BasicText("Settings", Modifier.padding(start = 28.dp, bottom = 8.dp), style = text(28))
               SheetRow("Immortal", GlassGlyphs.GEAR) { onOpen(SettingsTarget.Immortal) }

@@ -115,14 +115,27 @@ fun solidBackground(color: Long) = BackgroundSource { w, h ->
   Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(color.toInt()) }
 }
 
-/** A photo, centre-cropped to fill the screen. */
+/**
+ * A photo, centre-cropped to fill the screen, darkened towards the top and bottom so white text and
+ * glass stay legible on a bright picture. Baked in here because a blurred text shadow at clock size
+ * cost the Gen-1 GPU a janky frame in two during face transitions.
+ */
 fun photoBackground(photo: Bitmap) = BackgroundSource { w, h ->
   val scale = maxOf(w.toFloat() / photo.width, h.toFloat() / photo.height)
   val sw = (w / scale).toInt()
   val sh = (h / scale).toInt()
   val src = android.graphics.Rect((photo.width - sw) / 2, (photo.height - sh) / 2, (photo.width + sw) / 2, (photo.height + sh) / 2)
   val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-  Canvas(out).drawBitmap(photo, src, android.graphics.Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+  val canvas = Canvas(out)
+  canvas.drawBitmap(photo, src, android.graphics.Rect(0, 0, w, h), Paint(Paint.FILTER_BITMAP_FLAG))
+  val scrim = Paint(Paint.DITHER_FLAG)
+  scrim.shader =
+      LinearGradient(
+          0f, 0f, 0f, h.toFloat(),
+          intArrayOf(0x73000000, 0x00000000, 0x00000000, 0x59000000),
+          floatArrayOf(0f, 0.55f, 0.8f, 1f),
+          Shader.TileMode.CLAMP)
+  canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), scrim)
   out
 }
 
