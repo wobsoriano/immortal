@@ -144,7 +144,8 @@ fun GlassHome(actions: GlassActions) {
     ui = ui.reduce(e)
   }
   LaunchedEffect(ui.face, ui.looks) { GlassPrefs.save(context, ui) }
-  BackHandler(enabled = ui.layer != GlassLayer.Faces) { send(GlassEvent.Back) }
+  // Always on: as the home screen, Back on a face must not finish us and expose whatever task is below.
+  BackHandler { send(GlassEvent.Back) }
 
   val device = remember { GlassDevice(context) }
   var deviceState by remember { mutableStateOf(device.read()) }
