@@ -40,7 +40,7 @@ object UpdateManager {
   // the same field can target a test server on the LAN.
   @Volatile
   var updateUrl: String =
-      "https://raw.githubusercontent.com/starbrightlab/immortal/main/version.json"
+      "https://raw.githubusercontent.com/wobsoriano/immortal/glass/version.json"
 
   private val io = Executors.newSingleThreadExecutor()
   // Lazy so touching the pure helpers (parseManifest/shouldUpdate/cacheBust) in a

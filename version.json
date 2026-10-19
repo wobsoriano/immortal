@@ -1,6 +1,6 @@
 {
   "versionCode": 68,
   "versionName": "1.74",
-  "apkUrl": "https://github.com/starbrightlab/immortal/releases/latest/download/immortal.apk",
+  "apkUrl": "https://github.com/wobsoriano/immortal/releases/latest/download/immortal.apk",
   "notes": "The Immich and WebDAV screensaver cache now fills with a random selection of your album and only swaps a small share on a slow schedule, instead of re-downloading constantly. New settings: Swap per refresh (default 5%) and Refresh from server every (default 1 day). The frame keeps playing from storage when the server is down."
 }
